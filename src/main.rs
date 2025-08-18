@@ -1,9 +1,12 @@
-
 use eframe::egui::{self, Frame, Margin, Vec2};
+use std::io::Read;
 use std::process::{Child, Command, Stdio};
 
 const ALSA_IN: &str = "hw:CARD=ATR2xUSB,DEV=0";
 const ALSA_OUT: &str = "default";
+
+// small buffer keeps latency modest but avoids constant xruns
+const SOX_BUFFER_BYTES: &str = "2048";
 
 #[derive(Clone, Copy, Debug)]
 enum Preset {
@@ -25,25 +28,43 @@ impl Preset {
 
     fn sox_args(&self) -> Vec<&'static str> {
         match self {
+            // Low-latency deep voice: no echo/reverb
             Preset::DeepRobot => vec![
-                "-t","alsa", ALSA_IN, "-t","alsa", ALSA_OUT,
-                "pitch","-400","bass","+10","reverb",
-                "echo","0.8","0.9","1000","0.3",
+                "--buffer", SOX_BUFFER_BYTES,
+                "-t", "alsa", ALSA_IN,
+                "-t", "alsa", ALSA_OUT,
+                "pitch", "-400",
+                "bass",  "+10",
             ],
+
+            // Keep it reliable: pitch up + light tremolo (cheap & fun)
             Preset::Alien => vec![
-                "-t","alsa", ALSA_IN, "-t","alsa", ALSA_OUT,
-                "pitch","+150","flanger",
-                "chorus","0.7","0.9","55","0.4","0.25","2",
+                "--buffer", SOX_BUFFER_BYTES,
+                "-t", "alsa", ALSA_IN,
+                "-t", "alsa", ALSA_OUT,
+                "pitch",   "+150",
+                "tremolo", "8", "40", // freq=8Hz, depth=40%
             ],
+
+            // No echo/reverb here either
             Preset::Chipmunk => vec![
-                "-t","alsa", ALSA_IN, "-t","alsa", ALSA_OUT,
-                "pitch","+500","treble","+6",
+                "--buffer", SOX_BUFFER_BYTES,
+                "-t", "alsa", ALSA_IN,
+                "-t", "alsa", ALSA_OUT,
+                "pitch",  "+500",
+                "treble", "+6",
             ],
+
+            // Fix compand points (missing comma). Light radio shaping + small hall.
             Preset::RadioHall => vec![
-                "-t","alsa", ALSA_IN, "-t","alsa", ALSA_OUT,
-                "highpass","300","lowpass","3400",
-                "compand","0.3,1","6:-70,-60,-20 -5","-10","-90","0.2",
-                "reverb","50",
+                "--buffer", SOX_BUFFER_BYTES,
+                "-t", "alsa", ALSA_IN,
+                "-t", "alsa", ALSA_OUT,
+                "highpass", "300",
+                "lowpass",  "3400",
+                // attack,decay | transfer points | gain | initial vol | delay
+                "compand", "0.3,1", "6:-70,-60,-20,-5", "-10", "-90", "0.2",
+                "reverb", "50",
             ],
         }
     }
@@ -61,18 +82,22 @@ impl VoiceChangerApp {
 
     fn start_preset(&mut self, preset: Preset) {
         self.stop_current();
+
+        // Build & spawn SoX
         match Command::new("sox")
             .args(preset.sox_args())
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::piped())
+            .stderr(Stdio::piped()) // capture errors for UI
             .spawn()
         {
             Ok(child) => {
                 self.status = format!("Running: {}", preset.label());
                 self.child = Some(child);
             }
-            Err(e) => self.status = format!("Failed to start SoX: {}", e),
+            Err(e) => {
+                self.status = format!("Failed to start SoX: {}", e);
+            }
         }
     }
 
@@ -82,6 +107,29 @@ impl VoiceChangerApp {
             let _ = c.wait();
         }
         self.status = "Stopped".into();
+    }
+
+    /// Called each frame to see if SoX died early (e.g., parse error / device busy).
+    fn poll_child_and_update_status(&mut self) {
+        if let Some(child) = &mut self.child {
+            if let Ok(Some(status)) = child.try_wait() {
+                let mut err = String::new();
+                if let Some(mut stderr) = child.stderr.take() {
+                    let _ = stderr.read_to_string(&mut err);
+                }
+                if status.success() {
+                    self.status = "Finished.".into();
+                } else {
+                    let last = err
+                        .lines()
+                        .rev()
+                        .find(|l| !l.trim().is_empty())
+                        .unwrap_or("SoX exited with error");
+                    self.status = format!("SoX error: {}", last);
+                }
+                self.child = None;
+            }
+        }
     }
 }
 
@@ -114,56 +162,57 @@ fn apply_compact_style(ctx: &egui::Context) {
 
 impl eframe::App for VoiceChangerApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // keep existing look/placement
         apply_compact_style(ctx);
 
-        // Slim top bar: status left, Quit right
+        // NEW: check if the running preset died & surface any SoX error
+        self.poll_child_and_update_status();
+
+        // Top bar (unchanged placement)
         egui::TopBottomPanel::top("top_bar")
             .show_separator_line(false)
             .exact_height(86.0)
-            .frame(Frame::default().inner_margin(Margin::symmetric(6,6)))
+            .frame(Frame::default().inner_margin(Margin::symmetric(6, 6)))
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     ui.small(self.status.clone());
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.add_sized(Vec2::new(90.0, 32.0), egui::Button::new("Quit")).clicked() {
+                        if ui
+                            .add_sized(Vec2::new(90.0, 32.0), egui::Button::new("Quit"))
+                            .clicked()
+                        {
                             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                         }
                     });
                 });
             });
 
-        // Central area: compute geometry, then center manually
+        // Central area (unchanged placement): manually centered 2×2 grid under title
         egui::CentralPanel::default()
             .frame(Frame::default().inner_margin(Margin::symmetric(8, 8)))
             .show(ctx, |ui| {
-                let avail   = ui.available_size();          // size after top bar
+                let avail   = ui.available_size();
                 let gap     = ui.spacing().item_spacing.x;
                 let title_h = 28.0;
 
-                // Largest square button that fits both width and height:
                 let side_max_x = (avail.x - gap) / 2.0;
                 let side_max_y = (avail.y - title_h - 8.0 - gap) / 2.0;
                 let side       = side_max_x.min(side_max_y).clamp(90.0, 160.0);
                 let sz         = Vec2::splat(side);
 
-                // Total block height (title + two rows) for vertical centering:
                 let block_h = title_h + 8.0 + (2.0 * side + gap);
                 let top_pad = ((avail.y - block_h) * 0.5).max(0.0);
 
-                // *** Horizontal centering: compute exact left margin for a row ***
                 let row_width = 2.0 * side + gap;
                 let left_pad  = ((avail.x - row_width) * 0.5).max(0.0);
 
-                // Move down to vertical center
                 ui.add_space(top_pad);
 
-                // Title centered
                 ui.with_layout(egui::Layout::top_down(egui::Align::Center), |ui| {
                     ui.heading("Select a Mode");
                     ui.add_space(8.0);
                 });
 
-                // Row 1 — manual left pad + buttons
                 ui.horizontal(|ui| {
                     ui.add_space(left_pad);
                     if ui.add_sized(sz, egui::Button::new("Deep Robot")).clicked() {
@@ -177,7 +226,6 @@ impl eframe::App for VoiceChangerApp {
 
                 ui.add_space(gap);
 
-                // Row 2 — same manual centering
                 ui.horizontal(|ui| {
                     ui.add_space(left_pad);
                     if ui.add_sized(sz, egui::Button::new("Chipmunk")).clicked() {
@@ -189,7 +237,6 @@ impl eframe::App for VoiceChangerApp {
                     }
                 });
 
-                // Keep block centered if there’s leftover vertical space
                 let remaining = ui.available_size().y;
                 if remaining > 0.0 { ui.add_space(remaining); }
             });
@@ -198,7 +245,6 @@ impl eframe::App for VoiceChangerApp {
 
 fn main() -> eframe::Result<()> {
     let mut native_options = eframe::NativeOptions::default();
-    // Fullscreen is simplest on the Pi; switch to windowed if you prefer.
     native_options.viewport = egui::ViewportBuilder::default().with_fullscreen(true);
 
     eframe::run_native(
