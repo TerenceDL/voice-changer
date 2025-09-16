@@ -11,7 +11,7 @@ const SOX_BUFFER_BYTES: &str = "2048";
 #[derive(Clone, Copy, Debug)]
 enum Preset {
     DeepRobot,
-    Alien,
+    GhostFace,
     Chipmunk,
     RadioHall,
 }
@@ -20,7 +20,7 @@ impl Preset {
     fn label(&self) -> &'static str {
         match self {
             Preset::DeepRobot => "Deep Robot",
-            Preset::Alien => "Alien",
+            Preset::GhostFace => "Ghost Face",
             Preset::Chipmunk => "Chipmunk",
             Preset::RadioHall => "Radio + Hall",
         }
@@ -37,16 +37,23 @@ impl Preset {
                 "bass",  "+10",
             ],
 
-            // Keep it reliable: pitch up + light tremolo (cheap & fun)
-            Preset::Alien => vec![
+            // Ghost Face: slight pitch down + band-limit + compression + light grit
+            Preset::GhostFace => vec![
                 "--buffer", SOX_BUFFER_BYTES,
                 "-t", "alsa", ALSA_IN,
                 "-t", "alsa", ALSA_OUT,
-                "pitch",   "+150",
-                "tremolo", "8", "40", // freq=8Hz, depth=40%
+                // keep it scary but intelligible
+                "pitch", "-200",
+                // telephone/radio band
+                "highpass", "250",
+                "lowpass",  "3400",
+                // gentle broadcast-style compression (attack,decay | curve | out gain | init vol | delay)
+                "compand", "0.3,1", "6:-70,-60,-20,-5", "-8", "-90", "0.2",
+                // touch of grit (gain, color) — keep subtle
+                "overdrive", "10", "20",
             ],
 
-            // No echo/reverb here either
+            // Bright, fast, no reverb
             Preset::Chipmunk => vec![
                 "--buffer", SOX_BUFFER_BYTES,
                 "-t", "alsa", ALSA_IN,
@@ -55,7 +62,7 @@ impl Preset {
                 "treble", "+6",
             ],
 
-            // Fix compand points (missing comma). Light radio shaping + small hall.
+            // Radio band + compand + small hall
             Preset::RadioHall => vec![
                 "--buffer", SOX_BUFFER_BYTES,
                 "-t", "alsa", ALSA_IN,
@@ -165,7 +172,7 @@ impl eframe::App for VoiceChangerApp {
         // keep existing look/placement
         apply_compact_style(ctx);
 
-        // NEW: check if the running preset died & surface any SoX error
+        // check if the running preset died & surface any SoX error
         self.poll_child_and_update_status();
 
         // Top bar (unchanged placement)
@@ -219,8 +226,8 @@ impl eframe::App for VoiceChangerApp {
                         self.start_preset(Preset::DeepRobot);
                     }
                     ui.add_space(gap);
-                    if ui.add_sized(sz, egui::Button::new("Alien")).clicked() {
-                        self.start_preset(Preset::Alien);
+                    if ui.add_sized(sz, egui::Button::new("Ghost Face")).clicked() {
+                        self.start_preset(Preset::GhostFace);
                     }
                 });
 
@@ -253,4 +260,5 @@ fn main() -> eframe::Result<()> {
         Box::new(|_cc| Ok(Box::new(VoiceChangerApp::new()))),
     )
 }
+
 
