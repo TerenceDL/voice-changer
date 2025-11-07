@@ -1,0 +1,14 @@
+[package]
+name = "rt_voice_io"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+cpal = "0.16"     # no feature flags here
+ringbuf = "0.4"
+anyhow = "1.0"
+ctrlc = "3.4"
+
+
+
+
